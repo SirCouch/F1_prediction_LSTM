@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+.venv/
+ENV/
+
+# IDEs
+.vscode/
+.idea/
+
+# Project Specific
+f1_cache/
+*.npy
+processed_f1_data.csv
+f1_lstm_model.pth
+loss_plot.png
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
