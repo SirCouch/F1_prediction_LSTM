@@ -2,21 +2,31 @@ import torch
 import pandas as pd
 import numpy as np
 import fastf1
-from model import F1LSTM
+from model import F1Predictor
 import os
+import json
 
 # Enable cache
 fastf1.Cache.enable_cache('f1_cache')
 
 def predict_race(year, round_num):
+    # Load metadata
+    try:
+        with open('model_metadata.json', 'r') as f:
+            metadata = json.load(f)
+    except FileNotFoundError:
+        print("Metadata not found. Run 'python f1_cli.py update' first.")
+        return
+
     # Load model
-    input_size = 6 # Grid, Team, Event, Pos, Compound, TyreLife
     hidden_size = 64
-    num_layers = 2
-    output_size = 1
-    
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = F1LSTM(input_size, hidden_size, num_layers, output_size).to(device)
+    
+    model = F1Predictor(
+        num_drivers=metadata['num_drivers'],
+        num_teams=metadata['num_teams'],
+        hidden_size=hidden_size
+    ).to(device)
     
     try:
         model.load_state_dict(torch.load('f1_lstm_model.pth'))
@@ -25,67 +35,97 @@ def predict_race(year, round_num):
         print("Model file not found. Run 'python f1_cli.py update' first.")
         return
 
-    # Load historical data
+    # Load historical data for lookups and history sequences
     df = pd.read_csv('processed_f1_data.csv')
     
     # Get race info
     session = fastf1.get_session(year, round_num, 'R')
     session.load(laps=True, telemetry=False, weather=False)
     results = session.results
-    laps = session.laps
     
     predictions = []
     
+    # Normalization constants (from training)
+    # History Features: [Grid, Team, Event, Pos, Comp, Life]
     max_team_id = df['TeamID'].max()
     max_event_id = df['EventID'].max()
     max_comp_id = df['CompoundID'].max()
-
+    
     for _, driver in results.iterrows():
         abbr = driver['Abbreviation']
         grid = driver['GridPosition']
         team = driver['TeamName']
-        event = session.event['EventName']
         
+        # 1. Lookup IDs
         try:
-            team_id = df[df['TeamName'] == team]['TeamID'].iloc[0]
-            event_id = df[df['EventName'] == event]['EventID'].iloc[0] 
+            # Get the ID used in training for this driver/team
+            # We take the last known ID for this abbreviation
+            d_id_lookup = df[df['Abbreviation'] == abbr]['DriverID']
+            if not d_id_lookup.empty:
+                driver_id = d_id_lookup.iloc[0]
+            else:
+                # New driver? Use 0 or handle gracefully. 
+                # For now, let's assume unknown = 0 if not found, but ideally we'd have an UNK token
+                driver_id = 0 
+                
+            t_id_lookup = df[df['TeamName'] == team]['TeamID']
+            if not t_id_lookup.empty:
+                team_id = t_id_lookup.iloc[0]
+            else:
+                team_id = 0
+                
         except IndexError:
+            driver_id = 0
             team_id = 0
-            event_id = 0
             
-        # Get last 5 race results for this driver
+        # 2. Construct History Sequence (Last 5 races)
         driver_history = df[df['Abbreviation'] == abbr].tail(5)
         
         if len(driver_history) < 5:
-            # Fill with current grid if not enough history
+            # Fill with zeros or basic info if not enough history
+            # (5, 6) shape
             history_features = np.zeros((5, 6))
-            history_features[:, 0] = grid / 20.0
-            history_features[:, 1] = team_id / max_team_id
-            history_features[:, 2] = event_id / max_event_id
-            history_features[:, 3] = grid / 21.0
-            history_features[:, 4] = 0 # Default compound
-            history_features[:, 5] = 0 # Default life
+            # Fallback: fill with current grid/team info vaguely 
+            # to avoid pure zero vectors if possible, or just leave as zeros.
+            # Leaving as zeros is safer for "no history".
         else:
-            history_features = driver_history[['GridPosition', 'TeamID', 'EventID', 'Position', 'CompoundID', 'TyreLife']].values.copy().astype(float)
+            # [GridPosition, TeamID, EventID, Position, CompoundID, TyreLife]
+            history_features = driver_history[['GridPosition', 'TeamID', 'EventID', 'Position', 'CompoundID', 'TyreLife']].values.copy()
+            
+            # Normalize
+            history_features = history_features.astype(float)
             history_features[:, 0] /= 20.0
             history_features[:, 1] /= max_team_id
             history_features[:, 2] /= max_event_id
             history_features[:, 3] /= 21.0
             history_features[:, 4] /= max_comp_id
             history_features[:, 5] /= 100.0
+            
+        # 3. Prepare Tensors
+        # Driver/Team IDs: (1)
+        # History: (1, 5, 6)
+        # Grid: (1, 1) normalized
         
-        input_tensor = torch.from_numpy(history_features).float().unsqueeze(0).to(device)
+        t_d_id = torch.tensor([driver_id]).long().to(device)
+        t_t_id = torch.tensor([team_id]).long().to(device)
+        t_hist = torch.from_numpy(history_features).float().unsqueeze(0).to(device)
         
+        # Normalize current grid pos
+        norm_grid = float(grid) / 20.0
+        t_grid = torch.tensor([[norm_grid]]).float().to(device)
+        
+        # 4. Predict
         with torch.no_grad():
-            pred_norm = model(input_tensor).item()
+            pred_norm = model(t_d_id, t_t_id, t_hist, t_grid).item()
             pred_pos = pred_norm * 21.0
+            
             predictions.append({
                 'Driver': abbr,
                 'Grid': grid,
                 'PredictedPosition': pred_pos
             })
             
-    # Sort by predicted position
+    # Sort and Display
     pred_df = pd.DataFrame(predictions).sort_values('PredictedPosition')
     pred_df['PredictedRank'] = range(1, len(pred_df) + 1)
     
@@ -95,5 +135,5 @@ def predict_race(year, round_num):
     return pred_df
 
 if __name__ == "__main__":
-    # Test on a 2024 race (e.g., Round 1)
+    # Test
     predict_race(2024, 1)

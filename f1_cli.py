@@ -7,6 +7,7 @@ from data_loader import fetch_race_data, preprocess_data, create_sequences
 from train import train_model
 from predict import predict_race
 import numpy as np
+import json
 
 def main():
     parser = argparse.ArgumentParser(description="F1 Race Outcome Predictor CLI")
@@ -30,22 +31,45 @@ def main():
         print(f"Updating data for years: {args.years}")
         data = fetch_race_data(args.years)
         processed_data = preprocess_data(data)
-        X, y = create_sequences(processed_data)
         
-        # Normalization logic replicated from data_loader
-        X = X.astype(float)
-        X[:, :, 0] = X[:, :, 0] / 20.0
-        X[:, :, 1] = X[:, :, 1] / processed_data['TeamID'].max()
-        X[:, :, 2] = X[:, :, 2] / processed_data['EventID'].max()
-        X[:, :, 3] = X[:, :, 3] / 21.0
-        X[:, :, 4] = X[:, :, 4] / processed_data['CompoundID'].max()
-        X[:, :, 5] = X[:, :, 5] / 100.0
+        # New split return values
+        h_X, d_ids, t_ids, g_pos, y = create_sequences(processed_data)
+        
+        # Normalize Continuous Features
+        # History Features: [Grid, Team, Event, Pos, Comp, Life]
+        h_X = h_X.astype(float)
+        h_X[:, :, 0] /= 20.0
+        h_X[:, :, 1] /= processed_data['TeamID'].max()
+        h_X[:, :, 2] /= processed_data['EventID'].max()
+        h_X[:, :, 3] /= 21.0
+        h_X[:, :, 4] /= processed_data['CompoundID'].max()
+        h_X[:, :, 5] /= 100.0
+        
+        # Current Grid Pos
+        g_pos = g_pos.astype(float) / 20.0
+        
+        # Target normalization
         y = y / 21.0
 
-        np.save('X.npy', X)
+        # Save Data
+        np.save('history_X.npy', h_X)
+        np.save('driver_ids.npy', d_ids)
+        np.save('team_ids.npy', t_ids)
+        np.save('grid_pos.npy', g_pos)
         np.save('y.npy', y)
         processed_data.to_csv('processed_f1_data.csv', index=False)
-        print(f"Saved {len(X)} sequences. Starting training...")
+        
+        # Save Metadata
+        metadata = {
+            'num_drivers': int(processed_data['DriverID'].max() + 1),
+            'num_teams': int(processed_data['TeamID'].max() + 1),
+            'max_event_id': int(processed_data['EventID'].max()),
+            'max_compound_id': int(processed_data['CompoundID'].max())
+        }
+        with open('model_metadata.json', 'w') as f:
+            json.dump(metadata, f)
+
+        print(f"Saved {len(y)} sequences. Starting training...")
         train_model()
 
     elif args.command == "predict":
